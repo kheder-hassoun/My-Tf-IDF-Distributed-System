@@ -1,0 +1,311 @@
+import Document_and_Data.Document;
+import Document_and_Data.DocumentTermsInfo;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.client.RestTemplate;
+
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.*;
+import java.util.stream.Collectors;
+
+@RestController
+@RequestMapping("/leader")
+public class Leader {
+
+    private static final List<DocumentTermsInfo> documentTermsInfo = Collections.synchronizedList(new ArrayList<>());
+    private static final String FOLDER_PATH = "D:\\4 and 5\\five\\Ds\\project\\ds_project_part1\\My-TF-IDF\\src\\main\\resources\\documents"; // Update as needed
+    private static final Logger logger = LoggerFactory.getLogger(Leader.class);
+
+    private static final String WORKER_URL = "http://localhost:8081/worker/process"; // Update worker's URL if needed
+
+    @PostMapping("/start")
+    public TreeMap<String, Double> start(@RequestBody String searchQuery) {
+        RestTemplate restTemplate = new RestTemplate();
+
+        // Send search parameters to the worker and get the results
+        List<DocumentTermsInfo> workerResponse = restTemplate.postForObject(WORKER_URL, searchQuery, List.class);
+
+        if (workerResponse == null || workerResponse.isEmpty()) {
+            logger.warn("No results returned from the worker.");
+            return new TreeMap<>();
+        }
+        List<Document> ducuments = getDocumentsFromResources();
+        // Calculate IDF and document scores
+        Map<String, Double> idfs = calculateIDF(workerResponse, ducuments.size(),
+                searchQuery);
+        Map<Document, Double> documentScores = calculateDocumentsScore(idfs, workerResponse);
+
+        // Sort and return the results
+        return sortDocumentsScoresByName(documentScores);
+    }
+
+    private List<Document> getDocumentsFromResources() {
+        try {
+            return Files.walk(Paths.get(FOLDER_PATH))
+                    .filter(Files::isRegularFile)
+                    .map(path -> new Document(path.getFileName().toString()))
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            logger.error("Error reading documents: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    private Map<String, Double> calculateIDF(List<DocumentTermsInfo> documentTermsInfo, double totalDocuments, String searchQuery) {
+        Map<String, Double> wordDocumentCount = new HashMap<>();
+        for (DocumentTermsInfo termsInfo : documentTermsInfo) {
+            termsInfo.getTermFrequency().keySet().forEach(term -> wordDocumentCount.merge(term, 1.0, Double::sum));
+        }
+
+        Map<String, Double> idfs = new HashMap<>();
+        for (String term : searchQuery.split("\\s+")) {
+            double documentCount = wordDocumentCount.getOrDefault(term, 0.0);
+            idfs.put(term, documentCount > 0 ? Math.log10(totalDocuments / documentCount) : 0.0);
+        }
+        return idfs;
+    }
+
+    private Map<Document, Double> calculateDocumentsScore(Map<String, Double> idfs, List<DocumentTermsInfo> documentTermsInfo) {
+        Map<Document, Double> documentScores = new HashMap<>();
+        for (DocumentTermsInfo termsInfo : documentTermsInfo) {
+            double score = termsInfo.getTermFrequency().entrySet().stream()
+                    .mapToDouble(entry -> idfs.getOrDefault(entry.getKey(), 0.0) * entry.getValue())
+                    .sum();
+            documentScores.put(termsInfo.getDocument(), score);
+        }
+        return documentScores;
+    }
+
+    private TreeMap<String, Double> sortDocumentsScoresByName(Map<Document, Double> documentScores) {
+        return documentScores.entrySet().stream()
+                .collect(Collectors.toMap(entry -> entry.getKey().getName(), Map.Entry::getValue, (e1, e2) -> e1, TreeMap::new));
+    }
+}
+------------------------
+import Document_and_Data.Document;
+import Document_and_Data.DocumentTermsInfo;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.web.bind.annotation.*;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.stream.Collectors;
+
+@RestController
+@RequestMapping("/worker")
+public class Worker {
+
+    private static final Logger logger = LoggerFactory.getLogger(Worker.class);
+    private static final String DOCUMENTS_PATH = "D:\\4 and 5\\five\\Ds\\project\\ds_project_part1\\My-TF-IDF\\src\\main\\resources\\documents"; // Update as needed
+
+    @PostMapping("/process")
+    public List<DocumentTermsInfo> processDocuments(@RequestBody String searchQuery) {
+        logger.info("Processing documents for query: {}", searchQuery);
+        return calculateDocumentScores(getDocumentsFromResources(), searchQuery);
+    }
+    private List<Document> getDocumentsFromResources() {
+        try {
+            return Files.walk(Paths.get(DOCUMENTS_PATH))
+                    .filter(Files::isRegularFile)
+                    .map(path -> new Document(path.getFileName().toString()))
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            logger.error("Error reading documents: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+    private List<DocumentTermsInfo> calculateDocumentScores(List<Document> documents, String searchQuery) {
+        List<DocumentTermsInfo> documentTermsInfos = new ArrayList<>();
+        String[] queryWords = searchQuery.split("\\s+");
+
+        for (Document document : documents) {
+            String filePath = DOCUMENTS_PATH + "\\" + document.getName();
+            File file = new File(filePath);
+
+            if (!file.exists()) {
+                logger.warn("File not found: {}", filePath);
+                continue;
+            }
+
+            try (InputStream inputStream = new FileInputStream(file)) {
+                byte[] data = inputStream.readAllBytes();
+                String fileContent = new String(data);
+                DocumentTermsInfo termsInfo = calculateScore(fileContent, queryWords, document.getName());
+                documentTermsInfos.add(termsInfo);
+            } catch (Exception e) {
+                logger.error("Error processing document {}: {}", document.getName(), e.getMessage());
+            }
+        }
+        return documentTermsInfos;
+    }
+
+    private DocumentTermsInfo calculateScore(String fileContent, String[] queryWords, String docName) {
+        DocumentTermsInfo documentTermsInfo = new DocumentTermsInfo();
+        Document document = new Document(docName);
+        documentTermsInfo.setDocument(document);
+
+        HashMap<String, Double> termsInfo = new HashMap<>();
+        for (String word : queryWords) {
+            long count = fileContent.split("\\b" + word + "\\b").length - 1;
+            termsInfo.put(word, (double) count);
+        }
+
+        documentTermsInfo.setTermFrequency(termsInfo);
+        return documentTermsInfo;
+    }
+}
+-------------------
+import org.apache.zookeeper.KeeperException;
+
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+
+
+public class OnElectionAction implements OnElectionCallback {
+    private final ServiceRegistry serviceRegistry;
+    private final int port;
+    public OnElectionAction(ServiceRegistry serviceRegistry, int port) {
+        this.serviceRegistry = serviceRegistry;
+        this.port = port;
+    }
+    @Override
+    public void onElectedToBeLeader() {
+        try {
+            String ipAddress = InetAddress.getLocalHost().getHostAddress();
+            serviceRegistry.unregisterFromCluster();
+            serviceRegistry.registerToClusterAsCoordinator(ipAddress);
+            serviceRegistry.registerForUpdates();
+            Leader leader = new Leader();
+           // GrpcServerLauncher.start();
+        } catch (UnknownHostException e) {
+            throw new RuntimeException(e);
+        } catch (KeeperException | InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+    }
+    @Override
+    public void onWorker() {
+        try {
+            String ipAddress = InetAddress.getLocalHost().getHostAddress();
+            System.out.println("worker get its ip and its : " +ipAddress);
+            String currentServerAddress = String.format("%s:%s", ipAddress, port);
+            serviceRegistry.registerToCluster(currentServerAddress);
+            Worker worker = new Worker();
+           // worker.start();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } catch (UnknownHostException e) {
+            e.printStackTrace();
+        } catch (KeeperException e) {
+            e.printStackTrace();
+        }
+    }
+}
+-------------------------------
+import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.WatchedEvent;
+import org.apache.zookeeper.Watcher;
+import org.apache.zookeeper.ZooKeeper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.client.RestTemplate;
+
+import java.io.IOException;
+import java.util.List;
+import java.util.Scanner;
+import java.util.TreeMap;
+
+public class Application implements Watcher {
+    private static final Logger logger = LoggerFactory.getLogger(Application.class);
+    private static final String address = "192.168.10.133:2181";
+    private static final int SESSION_TIMEOUT = 3000; //dead client
+    private static final int DEFAULT_PORT = 8080;
+    private ZooKeeper zooKeeper;
+
+    public static void main(String[] args) throws IOException, InterruptedException, KeeperException {
+        System.out.println("Enter Port  **this port number that the leader node will use to communicate with the " +
+                "worker nodes.\n" +
+                "\n **");
+        Scanner scanner = new Scanner(System.in);
+        int currentServerPort = scanner.nextInt();
+
+        Application application = new Application();
+        ZooKeeper zooKeeper = application.connectToZookeeper();
+
+        ServiceRegistry serviceRegistry = new ServiceRegistry(zooKeeper);
+        OnElectionAction onElectionAction = new OnElectionAction(serviceRegistry, currentServerPort);
+
+        LeaderElection leaderElection = new LeaderElection(zooKeeper, onElectionAction);
+        leaderElection.volunteerForLeadership();
+        leaderElection.reelectLeader();
+
+        RestTemplate restTemplate = new RestTemplate();
+        String leaderUrl = "http://localhost:8080/leader/start";
+
+        // Loop until a worker becomes available
+        while (true) {
+            List<String> serviceAddresses = ServiceRegistry.getAllServiceAddresses();
+            if (serviceAddresses != null && !serviceAddresses.isEmpty()) {
+                break;
+            }
+            System.out.println("No workers available. Waiting for 5 seconds...");
+            Thread.sleep(5000);
+        }
+
+        // Send the search query to the leader
+        try {
+            ResponseEntity<TreeMap> response = restTemplate.postForEntity(leaderUrl, "fast food", TreeMap.class);
+            TreeMap<String, Double> results = response.getBody();
+            System.out.println("Search results: " + results);
+        } catch (Exception e) {
+            System.err.println("Failed to send query to leader: " + e.getMessage());
+        }
+
+        application.run();
+        application.close();
+    }
+
+    public ZooKeeper connectToZookeeper() throws IOException {
+        this.zooKeeper = new ZooKeeper(address, SESSION_TIMEOUT, this);
+        return zooKeeper;
+    }
+
+    public void run() throws InterruptedException {
+        synchronized (zooKeeper) {
+            zooKeeper.wait();
+        }
+    }
+
+    private void close() throws InterruptedException {
+        this.zooKeeper.close();
+    }
+
+    @Override
+    public void process(WatchedEvent watchedEvent) {
+        switch (watchedEvent.getType()) {
+            case None:
+                if (watchedEvent.getState() == Event.KeeperState.SyncConnected) {
+                    logger.debug("Successfully connected to Zookeeper");
+                } else if (watchedEvent.getState() == Event.KeeperState.Disconnected) {
+                    synchronized (zooKeeper) {
+                        logger.debug("Disconnected from Zookeeper");
+                        zooKeeper.notifyAll();
+                    }
+                } else if (watchedEvent.getState() == Event.KeeperState.Closed) {
+                    logger.debug("Closed Successfully");
+                }
+                break;
+        }
+    }
+}

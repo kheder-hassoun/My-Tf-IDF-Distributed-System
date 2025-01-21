@@ -4,6 +4,8 @@ import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooKeeper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.client.RestTemplate;
 
 import java.io.IOException;
 import java.util.List;
@@ -21,37 +23,40 @@ public class Application implements Watcher {
         System.out.println("Enter Port  **this port number that the leader node will use to communicate with the " +
                 "worker nodes.\n" +
                 "\n **");
-      Scanner scanner = new Scanner(System.in);
-        int currentServerPort = 0;
-       currentServerPort = scanner.nextInt();
+        Scanner scanner = new Scanner(System.in);
+        int currentServerPort = scanner.nextInt();
+
         Application application = new Application();
         ZooKeeper zooKeeper = application.connectToZookeeper();
 
-      //  logger.info("Connected");
-
         ServiceRegistry serviceRegistry = new ServiceRegistry(zooKeeper);
-
         OnElectionAction onElectionAction = new OnElectionAction(serviceRegistry, currentServerPort);
 
         LeaderElection leaderElection = new LeaderElection(zooKeeper, onElectionAction);
         leaderElection.volunteerForLeadership();
         leaderElection.reelectLeader();
-        Leader leader = new Leader();
-        String searchQuery = "fast food";
+
+        RestTemplate restTemplate = new RestTemplate();
+        String leaderUrl = "http://localhost:8080/leader/start";
+
         // Loop until a worker becomes available
         while (true) {
             List<String> serviceAddresses = ServiceRegistry.getAllServiceAddresses();
-            if (!serviceAddresses.isEmpty()) {
+            if (serviceAddresses != null && !serviceAddresses.isEmpty()) {
                 break;
             }
             System.out.println("No workers available. Waiting for 5 seconds...");
             Thread.sleep(5000);
         }
 
-        // Start the search
-        TreeMap<String, Double> results = leader.start(searchQuery);
-        System.out.println(results);
-
+        // Send the search query to the leader
+        try {
+            ResponseEntity<TreeMap> response = restTemplate.postForEntity(leaderUrl, "fast food", TreeMap.class);
+            TreeMap<String, Double> results = response.getBody();
+            System.out.println("Search results: " + results);
+        } catch (Exception e) {
+            System.err.println("Failed to send query to leader: " + e.getMessage());
+        }
 
         application.run();
         application.close();

@@ -18,6 +18,7 @@ public class OnElectionAction implements OnElectionCallback {
             serviceRegistry.unregisterFromCluster();
             serviceRegistry.registerToClusterAsCoordinator(ipAddress);
             serviceRegistry.registerForUpdates();
+            Leader leader = new Leader();
            // GrpcServerLauncher.start();
         } catch (UnknownHostException e) {
             throw new RuntimeException(e);
@@ -32,8 +33,8 @@ public class OnElectionAction implements OnElectionCallback {
             System.out.println("worker get its ip and its : " +ipAddress);
             String currentServerAddress = String.format("%s:%s", ipAddress, port);
             serviceRegistry.registerToCluster(currentServerAddress);
-            Worker worker = new Worker(port);
-            worker.start();
+            Worker worker = new Worker();
+           // worker.start();
         } catch (InterruptedException e) {
             e.printStackTrace();
         } catch (UnknownHostException e) {
